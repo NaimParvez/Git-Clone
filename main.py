@@ -3,8 +3,10 @@ import hashlib
 import json
 from pathlib import Path
 import sys
-from typing import Dict
+from typing import Dict, List, Tuple
 import zlib
+
+from __future__ import annotations
 
 
 class GitObject:
@@ -25,23 +27,57 @@ class GitObject:
 
     # decompress
     @classmethod
-    def deserialize(cls, data: bytes) -> "GitObject":  # we can do GitObject also instead "GitObject" for that use (from __future__ import annotations)
+    def deserialize(
+        cls, data: bytes
+    ) -> (
+        "GitObject"
+    ):  # we can do GitObject also instead "GitObject" for that use (from __future__ import annotations)
         decompressed = zlib.decompress(data)  # byte string
         null_idx = decompressed.find(b"\0")
         header = decompressed[:null_idx]
         content = decompressed[null_idx + 1 :]
-        
+
         obj_type, size = header.split(" ")
 
         return cls(obj_type, content)
 
 
 class Blob(GitObject):
-    def __init__(self, content:bytes):
-        super().__init__('blob', content)
-        
-    def get_content(self)-> bytes:
+    def __init__(self, content: bytes):
+        super().__init__("blob", content)
+
+    def get_content(self) -> bytes:
         return self.content
+
+
+class Tree(GitObject):
+    def __init__(self, entries: List[Tuple[str, str, str]]):
+        self.entries = entries or []  # list of tuples (mode, name, obj_hash)
+        content = self._serialize_entries()
+        super().__init__("tree", content)
+
+    def _serialize_entries(self) -> bytes:
+        # serialize the entries into bytes
+        # <mode> <name>\0<obj_hash>
+        content = b""
+        for mode, name, obj_hash in sorted(self.entries):
+            entry = f"{mode} {name}\0".encode() + bytes.fromhex(obj_hash)
+            content += entry
+        return content
+    
+    def add_entry(self, mode: str, name: str, obj_hash: str):
+        self.entries.append((mode, name, obj_hash))
+        self.content = self._serialize_entries()
+        
+     # decompress
+    @classmethod
+    def from_content(cls, content: bytes) -> Tree: 
+        tree = cls([])
+        idx = 0
+        
+        while idx < len(content):
+            null_idx = content.find(b"\0", idx)
+            
 
 
 class Repository:
@@ -82,78 +118,85 @@ class Repository:
         print(f"Initialized empty repository in {self.git_dir}")
 
         return True
-    
-    def store_object(self, obj:GitObject): #store git object and commits as well
-        obj_hash =obj.hash()
-        obj_dir =self.objects_dir /obj_hash[:2]  # 1st two digit of the hash is directory and rest will the file name inside that dir
+
+    def store_object(self, obj: GitObject):  # store git object and commits as well
+        obj_hash = obj.hash()
+        obj_dir = (
+            self.objects_dir / obj_hash[:2]
+        )  # 1st two digit of the hash is directory and rest will the file name inside that dir
         obj_file = obj_dir / obj_hash[2:]
-        
+
         if not obj_file.exists():
-            obj_dir.mkdir(exist_ok=True) #means if the directory already exists, don't error out
+            obj_dir.mkdir(
+                exist_ok=True
+            )  # means if the directory already exists, don't error out
             obj_file.write_bytes(obj.serialize())
-            
+
         return obj_hash
-            
-    def load_index(self)->Dict[str, str]:
+
+    def load_index(self) -> Dict[str, str]:
         if not self.index_file.exists():
             return {}
-        
+
         try:
             return json.loads(self.index_file.read_text())
         except:
             return {}
-        
-    def save_index(self,index: Dict[str,str]):
-        self.index_file.write_text(json.dumps(index, indent =2))
-            
-            
+
+    def save_index(self, index: Dict[str, str]):
+        self.index_file.write_text(json.dumps(index, indent=2))
+
     def add_file(self, path: str):
         # Read the file content
         full_path = self.path / path
         if not full_path.exists():
             raise FileExistsError(f"Path {full_path} not found")
-        
+
         content = full_path.read_bytes()
         # Create BLOB object from the content
         blob = Blob(content)
         # Store the blob object in database(.git/object)
-        blob_hash =self.store_object(blob)
+        blob_hash = self.store_object(blob)
         # Update the index to include the file
-        index=self.load_index()  #load the index file(assume index file as a database)
-        index[path] =blob_hash # add the file hash
-        self.save_index(index) # again save the index file
-        
+        index = (
+            self.load_index()
+        )  # load the index file(assume index file as a database)
+        index[path] = blob_hash  # add the file hash
+        self.save_index(index)  # again save the index file
+
         print(f"{path} Added")
-        
-    def add_directory(self,path:str):
-        
+
+    def add_directory(self, path: str):
+
         full_path = self.path / path
         if not full_path.exists():
             raise FileExistsError(f"Directory {full_path} not found")
-        
+
         if not full_path.is_dir():
             raise ValueError(f"{path} is not a Directory")
-        
-        index =self.load_index()
+
+        index = self.load_index()
         added_count = 0
         # Recursively traverse the directory
-        for file_path in full_path.rglob("*"):  #Recursively yield all existing files (of any kind, including directories) matching the given relative pattern, anywhere in this subtree
+        for file_path in full_path.rglob(
+            "*"
+        ):  # Recursively yield all existing files (of any kind, including directories) matching the given relative pattern, anywhere in this subtree
             if file_path.is_file():
                 if ".pygit" in file_path.parts or ".git" in file_path.parts:
                     continue
-                
-                #create & store blob object 
+
+                # create & store blob object
                 content = file_path.read_bytes()
                 blob = Blob(content)
                 blob_hash = self.store_object(blob)
-                
-                #update index
+
+                # update index
                 rel_path = str(file_path.relative_to(self.path))
-                index[rel_path]= blob_hash
-                added_count+=1
-                
+                index[rel_path] = blob_hash
+                added_count += 1
+
         self.save_index(index)
-        
+
         if added_count > 0:
             print(f"Added {added_count} files from directory {path}")
         else:
@@ -164,17 +207,31 @@ class Repository:
         pass
 
     def add_path(self, path: str) -> None:
-        full_path = (self.path / path)  # 1st path is from the resolver(current directory) and the 2nd path the file od directory we give
-        
+        full_path = (
+            self.path / path
+        )  # 1st path is from the resolver(current directory) and the 2nd path the file od directory we give
+
         if not full_path.exists():
             raise FileExistsError(f"Path {full_path} not found")
-        
+
         if full_path.is_file():
             self.add_file(path)
         elif full_path.is_dir():
             self.add_directory(path)
         else:
             raise ValueError(f"{path} is neither a file or a directory")
+
+    def create_tree_from_index(self):
+        index = self.load_index()
+        if not index:
+            tree = Tree()
+            raise self.store_object(tree)
+        pass
+
+    def commit(self, message: str, author: str) -> None:
+        # Create a tree object from the current index(staging area)
+        tree_hash = self.create_tree_from_index()
+        pass
 
 
 def main():
@@ -190,6 +247,13 @@ def main():
         "add", help="Add files and directories to the staging area"
     )
     add_parser.add_argument("paths", nargs="+", help="Files and directories to add")
+
+    commit_parser = subparser.add_parser(
+        "commit", help="Commit the staged changes to the repository"
+    )
+
+    commit_parser.add_argument("-m", "--message", required=True, help="Commit message")
+    commit_parser.add_argument("--author", help="Author name and email")
 
     args = parser.parse_args()
 
@@ -212,6 +276,12 @@ def main():
             for path in args.paths:
                 repo.add_path(path)
 
+        elif args.command == "commit":
+            if not repo.git_dir.exists():
+                print("No such repository exist !!")
+                return
+            author = args.author if args.author else "Anonymous <user@pygit>"
+            repo.commit(args.message, author)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
