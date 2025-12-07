@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import zlib
 
-
+ 
 
 
 class GitObject:
@@ -400,7 +400,101 @@ class Repository:
         self.save_index({}) # clear the index after commit to check next time if there is any change to commit
         print(f"Committed to {current_branch} with commit hash {commit_hash}")
         return commit_hash
+    
+    def get_files_from_tree(self, tree_hash: str, prefix: str = ""):
+        files = set()
+        
+        try:
+            tree_obj = self.load_object(tree_hash)
+            tree_data = Tree.from_content(tree_obj.content)
+            
+            for mode, name, obj_hash in tree_data.entries:
+                full_name = f"{prefix}{name}"
+                if mode == "40000": # directory
+                    sub_files = self.get_files_from_tree(obj_hash,f"{full_name}/")
+                    files.update(sub_files)
+                else:
+                    files.add(full_name)
+        except Exception as e:
+            print(f"Warning: Could not read tree {tree_hash}: {e}")
+        
+        return files
+            
+    
+    def checkout(self, branch: str, create_branch: bool = False):
+        #computed the files to be removed from working directory
+        previous_branch = self.get_current_branch()
+        files_to_remove = set()
+        
+        try:
+            previous_commit_hash = self.get_branch_commit(previous_branch)
+            if previous_commit_hash:
+                preveous_commit_obj = self.load_object(previous_commit_hash)
+                previous_commit_data = Commit.from_content(preveous_commit_obj.content)
+                previous_tree_hash = previous_commit_data.tree_hash
+                if previous_tree_hash:
+                    files_to_remove = self.get_files_from_tree(previous_tree_hash)
 
+        except Exception:
+            files_to_remove = set()
+        
+        #create or switch to the new branch
+        branch_file = self.heads_dir / branch
+        if not branch_file.exists():
+             if create_branch:
+                if previous_commit_hash:
+                    self.set_branch_commit(branch,previous_commit_hash)
+                    print(f"Created new branch {branch}")
+                else:
+                    print(f"Cannot create branch {branch} as there is no commit in current branch {previous_branch}")
+                    return
+
+             else:
+                print(f"Branch {branch} does not exist.")
+                print("Use -b option to create a new branch.")
+                return
+            
+        self.head_file.write_text(f"ref: refs/heads/{branch}\n")
+        #restore the files from the commit pointed by the new branch
+        self.restore_working_directory(branch, files_to_remove)
+        print(f"Switched to new branch {branch}")
+    
+    def restore_files_from_tree(self, tree_hash: str,path:Path):
+            tree_obj = self.load_object(tree_hash)
+            tree_data = Tree.from_content(tree_obj.content)
+            
+            for mode, name, obj_hash in tree_data.entries:
+                file_path = self.path / name
+                if mode == "40000": # directory
+                    file_path.mkdir(exist_ok=True)
+                    sub_files = self.restore_files_from_tree(obj_hash,file_path)
+                else:
+                    blob_obj = self.load_object(obj_hash)
+                    blob_data = Blob(blob_obj.content)
+                    file_path.write_bytes(blob_data.get_content())
+    
+    def restore_working_directory(self, branch: str, files_to_remove: set[str]):
+        target_commit_hash = self.get_branch_commit(branch)
+        if not target_commit_hash:
+            return
+        
+        #remove files tracked by previous branch
+        for rel_path in sorted(files_to_remove):
+            full_path = self.path / rel_path
+            try:
+                if full_path.exists() and full_path.is_file():
+                   full_path.unlink()
+            except Exception:
+                print(f"Warning: Could not remove file {full_path}")
+        target_commit_obj = self.load_object(target_commit_hash)
+        target_commit_data = Commit.from_content(target_commit_obj.content)
+        target_tree_hash = target_commit_data.tree_hash
+        
+        if target_tree_hash:
+            self.restore_files_from_tree(target_tree_hash,self.path)
+        
+        self.save_index({}) # clear the index after checkout
+        
 
 def main():
     parser = argparse.ArgumentParser(description="pygit - A simple git clone ")
@@ -416,12 +510,20 @@ def main():
     )
     add_parser.add_argument("paths", nargs="+", help="Files and directories to add")
 
+    # commit
     commit_parser = subparser.add_parser(
         "commit", help="Commit the staged changes to the repository"
     )
 
     commit_parser.add_argument("-m", "--message", required=True, help="Commit message")
     commit_parser.add_argument("--author", help="Author name and email")
+    
+    #checkout command
+    checkout_parser = subparser.add_parser(
+            "checkout", help="move/create a new branch"
+        )
+    checkout_parser.add_argument("branch", help="Branch to switch to")
+    checkout_parser.add_argument("-b","--create-branch",action="store_true", help="Create/Switch to a new branch")
 
     args = parser.parse_args()
 
@@ -450,6 +552,13 @@ def main():
                 return
             author = args.author if args.author else "Anonymous <user@pygit>"
             repo.commit(args.message, author)
+        
+        elif args.command == "checkout":
+            if not repo.git_dir.exists():
+                print("No such repository exist !!")
+                return
+            repo.checkout(args.branch, args.create_branch)
+            
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
