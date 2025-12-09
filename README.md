@@ -2,17 +2,6 @@
 
 A lightweight implementation of Git version control system written in pure Python. This project recreates the core functionality of Git, demonstrating how Git works under the hood.
 
-## Table of Contents
-
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Core Concepts](#core-concepts)
-- [Installation & Setup](#installation--setup)
-- [Commands](#commands)
-- [Usage Examples](#usage-examples)
-- [Architecture](#architecture)
-- [References](#references)
-
 ---
 
 ## Features
