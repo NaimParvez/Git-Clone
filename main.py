@@ -39,7 +39,8 @@ class GitObject:
         header = decompressed[:null_idx]
         content = decompressed[null_idx + 1 :]
 
-        obj_type, size = header.split(" ")
+        obj_type, size = header.split(b" ")
+        obj_type = obj_type.decode()
 
         return cls(obj_type, content)
 
@@ -495,6 +496,38 @@ class Repository:
         
         self.save_index({}) # clear the index after checkout
         
+    def branch(self, branch_name: str, delete: bool = False):
+        if delete: # delete branch
+            if not branch_name:
+                print("Please provide a branch name to delete.")
+                return
+            branch_file = self.heads_dir / branch_name
+            if not branch_file.exists():
+                print(f"Branch {branch_name} does not exist.")
+                return
+            branch_file.unlink()
+            print(f"Deleted branch {branch_name}")
+            return
+         # list branches or show specific branch
+        current_branch = self.get_current_branch()
+        if branch_name:
+           current_commit = self.get_branch_commit(current_branch)
+           if current_branch:
+               self.set_branch_commit(branch_name,current_commit)
+               print(f"Created branch {branch_name} at commit {current_commit}")
+           else:
+               print(f"No commits to create branch {branch_name}")
+        else:
+            branch= []
+            for branch_file in self.heads_dir.iterdir():
+                if branch_file.is_file() and not branch_file.name.startswith("."):
+                    branch.append(branch_file.name) 
+            
+            
+            for b in sorted(branch):
+                prefix = "*" if b == current_branch else " "
+                print(f"{prefix} {b}")
+               
 
 def main():
     parser = argparse.ArgumentParser(description="pygit - A simple git clone ")
@@ -524,6 +557,13 @@ def main():
         )
     checkout_parser.add_argument("branch", help="Branch to switch to")
     checkout_parser.add_argument("-b","--create-branch",action="store_true", help="Create/Switch to a new branch")
+
+    #branch command
+    branch_parser = subparser.add_parser(
+            "branch", help="List all branches"
+        )
+    branch_parser.add_argument("name",nargs="?", help="Branch name")
+    branch_parser.add_argument("-d","--delete", action="store_true", help="Branch to delete")
 
     args = parser.parse_args()
 
@@ -558,6 +598,12 @@ def main():
                 print("No such repository exist !!")
                 return
             repo.checkout(args.branch, args.create_branch)
+            
+        elif args.command == "branch":
+            if not repo.git_dir.exists():
+                print("No such repository exist !!")
+                return
+            repo.branch(args.name, args.delete)
             
     except Exception as e:
         print(f"Error: {e}")
