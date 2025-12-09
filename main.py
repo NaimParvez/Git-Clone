@@ -8,6 +8,8 @@ import time
 from typing import Dict, List, Optional, Tuple
 import zlib
 
+from importlib_resources import files
+
  
 
 
@@ -305,7 +307,7 @@ class Repository:
         index = self.load_index()
         if not index:
             tree = Tree()
-            raise self.store_object(tree)
+            return self.store_object(tree)
         dirs = {}
         files ={}
         
@@ -552,7 +554,125 @@ class Repository:
             else:
                 commit_hash = None
             count += 1
-               
+    
+    def build_index_from_tree(self, tree_hash: str, prefix: str = ""):
+        index = {}
+        
+        try:
+            tree_obj = self.load_object(tree_hash)
+            tree_data = Tree.from_content(tree_obj.content)
+            #list of tuples (mode, name, obj_hash)
+            for mode, name, obj_hash in tree_data.entries:
+                full_name = f"{prefix}{name}"
+                if mode == "40000": # directory
+                    sub_index = self.build_index_from_tree(obj_hash,f"{full_name}/")
+                    index.update(sub_index)
+                else:
+                    index[full_name]=obj_hash
+        except Exception as e:
+            print(f"Warning: Could not read tree {tree_hash}: {e}")
+        
+        return index
+    
+    def get_all_files(self) -> List[Path]:
+        files = []# file_path list
+        
+        for file_path in self.path.rglob("*"):
+            # Skip .pygit and .git directories
+            if ".pygit" in file_path.parts or ".git" in file_path.parts:
+                continue
+            if file_path.is_file():
+                files.append(file_path)
+                    
+        return files
+    
+    def status(self):
+        #what branch we are on
+        current_branch = self.get_current_branch()
+        print(f"On branch {current_branch}")
+        
+        index = self.load_index()
+        cureent_commit_hash = self.get_branch_commit(current_branch)
+        
+        #build the index of the latest commit
+        last_index_files = {}
+        if cureent_commit_hash:
+            try:
+                commit_obj = self.load_object(cureent_commit_hash)
+                commit_data = Commit.from_content(commit_obj.content)
+                if commit_data.tree_hash:
+                    last_index_files = self.build_index_from_tree(commit_data.tree_hash)
+
+            except Exception:
+                last_index_files = {}
+        
+        #figure out all the file present within the working directory
+        working_files = {} # file_path -> blob_hash
+        for item in self.get_all_files():
+            rel_path = str(item.relative_to(self.path))
+            try:
+                content = item.read_bytes()
+                blob = Blob(content)
+                blob_hash = blob.hash()
+                working_files[rel_path]=blob_hash
+            except Exception as e:
+                print(f"Warning: Could not read file {rel_path}: {e}")
+                continue
+            
+        staged_files = []
+        unstaged_files = []
+        untracked_files = []
+        deleted_files = []
+        
+        #what files are staged for commit
+        for file_path in set(index.keys()).union(set(last_index_files.keys())):
+            index_hash = index.get(file_path)
+            last_hash = last_index_files.get(file_path)
+            
+            if index_hash and not last_hash:
+                staged_files.append(("added new file", file_path))
+            elif index_hash and last_hash and index_hash != last_hash:
+                staged_files.append(("modified", file_path))
+        if staged_files:
+            print("\nChanges to be committed:")
+            for status, file_path in sorted(staged_files):
+                print(f"  {status}: {file_path}")
+                
+        #what files have been modified but not yet staged
+        for file_path in working_files:
+            if file_path in index:
+                working_hash = working_files[file_path]
+                index_hash = index[file_path]
+                if working_hash != index_hash:
+                    unstaged_files.append(("modified", file_path))
+                    
+        if unstaged_files:
+            print("\nChanges not staged for commit:")
+            for status, file_path in sorted(unstaged_files):
+                print(f"  {status}: {file_path}")
+                
+        #what files are untracked
+        for file_path in working_files:
+            if file_path not in index and file_path not in last_index_files:
+                untracked_files.append(file_path)
+                
+        if untracked_files:
+            print("\nUntracked files:")
+            for file_path in sorted(untracked_files):
+                print(f"  {file_path}")
+                
+        #what files have been deleted
+        for file_path in index:
+            if file_path not in working_files:
+                deleted_files.append(("deleted", file_path))
+        
+        if deleted_files:
+            print("\nDeleted files:")
+            for file_path in sorted(deleted_files):
+                print(f"  deleted: {file_path}")    
+                
+        if not (staged_files or unstaged_files or untracked_files or deleted_files):
+            print("Nothing to commit, working tree clean")  
 
 def main():
     parser = argparse.ArgumentParser(description="pygit - A simple git clone ")
@@ -596,6 +716,10 @@ def main():
         )
     log_parser.add_argument("-n","--number", type=int, default=10, help="Number of commits to show")
     
+    #status command
+    status_parser = subparser.add_parser(
+            "status", help="Show the working tree status"
+        )
     
     args = parser.parse_args()
 
@@ -641,7 +765,11 @@ def main():
                 print("No such repository exist !!")
                 return
             repo.log(args.number)
-        
+        elif args.command == "status":
+            if not repo.git_dir.exists():
+                print("No such repository exist !!")
+                return
+            repo.status()
             
     except Exception as e:
         print(f"Error: {e}")
