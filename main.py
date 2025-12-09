@@ -527,6 +527,31 @@ class Repository:
             for b in sorted(branch):
                 prefix = "*" if b == current_branch else " "
                 print(f"{prefix} {b}")
+    
+    def log(self, number: int = 10):
+        current_branch = self.get_current_branch()
+        commit_hash = self.get_branch_commit(current_branch)
+        if not commit_hash:
+            print("No commits yet")
+            return
+        count = 0
+        
+        while commit_hash and count < number:
+            commit_obj = self.load_object(commit_hash)
+            commit_data = Commit.from_content(commit_obj.content)
+            
+            print(f"Commit: {commit_hash}")
+            print(f"Author: {commit_data.author}")
+            print(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(commit_data.timestamp))}")
+            print()
+            print(f"    {commit_data.message}")
+            print()
+            
+            if commit_data.parent_hash:
+                commit_hash = commit_data.parent_hash[0] # follow first parent
+            else:
+                commit_hash = None
+            count += 1
                
 
 def main():
@@ -565,6 +590,13 @@ def main():
     branch_parser.add_argument("name",nargs="?", help="Branch name")
     branch_parser.add_argument("-d","--delete", action="store_true", help="Branch to delete")
 
+    #log command
+    log_parser = subparser.add_parser(
+            "log", help="Show commit logs"
+        )
+    log_parser.add_argument("-n","--number", type=int, default=10, help="Number of commits to show")
+    
+    
     args = parser.parse_args()
 
     if not args.command:
@@ -604,6 +636,12 @@ def main():
                 print("No such repository exist !!")
                 return
             repo.branch(args.name, args.delete)
+        elif args.command == "log":
+            if not repo.git_dir.exists():
+                print("No such repository exist !!")
+                return
+            repo.log(args.number)
+        
             
     except Exception as e:
         print(f"Error: {e}")
